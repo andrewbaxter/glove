@@ -1,15 +1,16 @@
 use {
-    std::io::ErrorKind,
-    tokio::{
-        io::{
-            AsyncWriteExt,
-            AsyncReadExt,
-        },
-        net::UnixStream,
-    },
+    schemars::JsonSchema,
     serde::{
         Deserialize,
         Serialize,
+    },
+    std::io::ErrorKind,
+    tokio::{
+        io::{
+            AsyncReadExt,
+            AsyncWriteExt,
+        },
+        net::UnixStream,
     },
 };
 
@@ -26,7 +27,8 @@ pub mod republish {
 pub type Error = String;
 
 #[doc(hidden)]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Resp<T> {
     Ok(T),
     Err(Error),
@@ -111,6 +113,20 @@ macro_rules! reqresp{
                 super::*,
             };
             //. .
+            /// Generate a mapping of request and response names to the associated type json schema. 
+            /// This is primarily intended for documentation generation (serializing schemas).
+                pub fn to_json_schema() -> std:: collections:: HashMap < String,
+                schemars::schema::RootSchema > {
+                    return[
+                        $(
+                            (stringify!($req_name).to_string(), schemars::schema_for!($req_type)),
+                            (format!("{}Resp", stringify!($req_name)), schemars::schema_for!($resp_type))
+                            //. .
+                            ,
+                        ) *
+                    ].into_iter().collect();
+                }
+            //. .
             pub struct ServerResp(Vec<u8>);
             impl ServerResp {
                 /// Create a generic (non request-specific) error response.
@@ -128,7 +144,11 @@ macro_rules! reqresp{
                     $req_name(fn($resp_type) -> ServerResp, $req_type),) *
             }
             //. .
-            #[doc(hidden)] #[derive(Serialize, Deserialize)] pub enum Req {
+            #[
+                doc(hidden)
+            ] #[
+                derive(Serialize, Deserialize)
+            ] #[serde(rename_all = "snake_case", deny_unknown_fields)] pub enum Req {
                 $($req_name($req_type),) *
             }
             //. .
