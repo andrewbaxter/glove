@@ -130,8 +130,8 @@ macro_rules! reqresp{
             pub struct ServerResp(Vec<u8>);
             impl ServerResp {
                 /// Create a generic (non request-specific) error response.
-                pub fn err<T: Serialize>(e: impl Into<String>) -> ServerResp {
-                    return ServerResp(serde_json::to_vec(&Resp::<T>::Err(e.into())).unwrap());
+                pub fn err(e: impl Into<String>) -> ServerResp {
+                    return ServerResp(serde_json::to_vec(&Resp::<()>::Err(e.into())).unwrap());
                 }
             }
             //. .
