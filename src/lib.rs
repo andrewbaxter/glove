@@ -1,14 +1,313 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use {
+    std::io::ErrorKind,
+    tokio::{
+        io::{
+            AsyncWriteExt,
+            AsyncReadExt,
+        },
+        net::UnixStream,
+    },
+    serde::{
+        Deserialize,
+        Serialize,
+    },
+};
+
+#[doc(hidden)]
+pub mod republish {
+    pub use serde;
+    pub use serde_json;
+    pub use tokio;
+    pub use libc;
+    pub use rustix;
+    pub use defer;
+}
+
+pub type Error = String;
+
+#[doc(hidden)]
+#[derive(Serialize, Deserialize)]
+pub enum Resp<T> {
+    Ok(T),
+    Err(Error),
+}
+
+#[doc(hidden)]
+pub async fn write_framed(conn: &mut UnixStream, message: &[u8]) -> Result<(), Error> {
+    conn.write_u64_le(message.len() as u64).await.map_err(|e| format!("Error writing frame size: {}", e))?;
+    conn.write_all(message).await.map_err(|e| format!("Error writing frame body: {}", e))?;
+    return Ok(());
+}
+
+#[doc(hidden)]
+pub async fn read_framed(conn: &mut UnixStream) -> Result<Option<Vec<u8>>, Error> {
+    let len = match conn.read_u64_le().await {
+        Ok(len) => len,
+        Err(e) => {
+            match e.kind() {
+                ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::UnexpectedEof => {
+                    return Ok(None);
+                },
+                _ => { },
+            }
+            return Err(format!("Error reading message length from connection: {}", e));
+        },
+    };
+    let mut body = vec![];
+    body.reserve(len as usize);
+    match conn.read_buf(&mut body).await {
+        Ok(_) => { },
+        Err(e) => {
+            return Err(format!("Error reading message body from connection: {}", e));
+        },
+    }
+    return Ok(Some(body));
+}
+
+/// See readme for details. This builds the request enum with trait with associated
+/// response types, client and server structs, and methods for sending/receiving
+/// messages.
+#[macro_export]
+macro_rules! reqresp{
+    ($vis: vis $name: ident {
+        $($req_name: ident($req_type: ty) => $resp_type: ty,) *
+    }) => {
+        $vis mod $name {
+            use {
+                $crate:: {
+                    republish:: {
+                        serde:: {
+                            Serialize,
+                            Deserialize,
+                            de::DeserializeOwned
+                        },
+                        serde_json,
+                        tokio:: {
+                            self,
+                            net:: {
+                                UnixStream,
+                                UnixSocket,
+                                UnixListener
+                            },
+                            fs:: {
+                                File
+                            },
+                        },
+                        rustix:: {
+                            self,
+                            fd::AsFd
+                        },
+                        libc,
+                        defer,
+                    },
+                    read_framed,
+                    write_framed,
+                    Error,
+                    Resp,
+                },
+            };
+            #[allow(unused_imports)]
+            use {
+                super::*,
+            };
+            //. .
+            pub struct ServerResp(Vec<u8>);
+            impl ServerResp {
+                /// Create a generic (non request-specific) error response.
+                pub fn err<T: Serialize>(e: impl Into<String>) -> ServerResp {
+                    return ServerResp(serde_json::to_vec(&Resp::<T>::Err(e.into())).unwrap());
+                }
+            }
+            //. .
+            pub enum ServerReq {
+                $(
+                    /// A request of type $req_type. This is a 2-tuple, with the first element being a
+                    /// "responder" which type-checks the response data and produces a `ServerResp`.
+                    /// The second element is the request data itself. See the readme for canonical
+                    /// usage.
+                    $req_name(fn($resp_type) -> ServerResp, $req_type),) *
+            }
+            //. .
+            #[doc(hidden)] #[derive(Serialize, Deserialize)] pub enum Req {
+                $($req_name($req_type),) *
+            }
+            //. .
+            #[doc(hidden)]
+            pub trait ReqTrait {
+                type Resp: Serialize + DeserializeOwned;
+
+                fn to_message(self) -> Req;
+            }
+            //. .
+            impl Req {
+                fn to_server_req(self) -> ServerReq {
+                    match self {
+                        $(
+                            Self:: $req_name(
+                                req_inner
+                            ) => ServerReq:: $req_name(
+                                |resp| ServerResp(serde_json::to_vec(&resp).unwrap()),
+                                req_inner
+                            ),
+                        ) *
+                    }
+                }
+            }
+            //. .
+            $(impl ReqTrait for $req_type {
+                type Resp = $resp_type;
+                fn to_message(self) -> Req {
+                    return Req:: $req_name(self);
+                }
+            }) * 
+            // UDS
+            //. .
+            pub struct Client(UnixStream);
+            impl Client {
+                /// Connect to an existing server socket.
+                pub async fn new(path: impl AsRef<std::path::Path>) -> Result<Client, String> {
+                    let path = path.as_ref();
+                    let conn =
+                        UnixSocket::new_stream()
+                            .map_err(|e| format!("Error initializing IPC unix socket: {}", e))?
+                            .connect(path)
+                            .await
+                            .map_err(|e| format!("Error connecting to IPC socket at [{:?}]: {}", path, e))?;
+                    return Ok(Self(conn));
+                }
+
+                /// Sends a request and returns the associated response, or an error.
+                pub async fn send_req<I: ReqTrait>(&mut self, req: I) -> Result<I::Resp, String> {
+                    write_framed(&mut self.0, &serde_json::to_vec(&req.to_message()).unwrap()).await?;
+                    let resp =
+                        read_framed(&mut self.0)
+                            .await
+                            .map_err(|e| format!("Error reading IPC response: {}", e))?
+                            .ok_or_else(|| format!("Disconnected by remote host"))?;
+                    let resp =
+                        serde_json::from_slice::<Resp<I::Resp>>(
+                            &resp,
+                        ).map_err(
+                            |e| format!(
+                                "Error parsing IPC response: {}\nBody: {}",
+                                e,
+                                String::from_utf8_lossy(&resp)
+                            ),
+                        )?;
+                    match resp {
+                        Resp::Ok(v) => return Ok(v),
+                        Resp::Err(e) => return Err(e),
+                    }
+                }
+            }
+            pub struct Server {
+                sock: UnixListener,
+                cleanup: Vec<Box<dyn std::any::Any>>,
+            }
+            pub struct ServerConn(UnixStream);
+            impl Server {
+                /// Create the IPC socket. This uses file locks to prevent multiple servers from
+                /// clobbering eachother.
+                pub async fn new(path: impl AsRef<std::path::Path>) -> Result<Server, Error> {
+                    let ipc_path = path.as_ref().to_path_buf();
+                    let lock_path = ipc_path.with_extension("lock");
+                    let filelock =
+                        File::options()
+                            .mode(0o660)
+                            .write(true)
+                            .create(true)
+                            .custom_flags(libc::O_CLOEXEC)
+                            .open(&lock_path)
+                            .await
+                            .map_err(|e| format!("Error opening IPC lock file at [{:?}]: {}", lock_path, e))?;
+                    rustix::fs::flock(
+                        filelock.as_fd(),
+                        rustix::fs::FlockOperation::NonBlockingLockExclusive,
+                    ).map_err(
+                        |e| format!(
+                            "Error getting exclusive lock for IPC socket at lock path [{:?}], is another instance using the same socket path? {}",
+                            lock_path,
+                            e
+                        ),
+                    )?;
+                    let clean_lock = defer::defer(move || {
+                        _ = std::fs::remove_file(&lock_path);
+                    });
+                    match tokio::fs::remove_file(&ipc_path).await {
+                        Ok(_) => { },
+                        Err(e) => match e.kind() {
+                            std::io::ErrorKind::NotFound => { },
+                            _ => {
+                                return Err(format!("Error cleaning up old IPC socket at [{:?}]: {}", ipc_path, e));
+                            },
+                        },
+                    }
+                    let sock =
+                        UnixListener::bind(
+                            &ipc_path,
+                        ).map_err(|e| format!("Error creating IPC listener at [{:?}]: {}", ipc_path, e))?;
+                    return Ok(Server {
+                        sock: sock,
+                        cleanup: vec![Box::new(clean_lock), Box::new(defer::defer(move || {
+                            _ = std::fs::remove_file(&ipc_path);
+                        }))],
+                    });
+                }
+
+                /// Wait for a client connection.
+                pub async fn accept(&mut self) -> Result<ServerConn, Error> {
+                    let (stream, _peer) = match self.sock.accept().await {
+                        Ok((stream, peer)) => (stream, peer),
+                        Err(e) => {
+                            return Err(format!("Error accepting connection: {}", e));
+                        },
+                    };
+                    return Ok(ServerConn(stream));
+                }
+            }
+            impl ServerConn {
+                /// Wait for the next message.  Returns `None` if the connection is closed,
+                /// otherwise the request. The request is an enum where each variant is a 2-tuple
+                /// of a "responder" and the specific request data.
+                ///
+                /// The responder is a function that only accepts the specific success response
+                /// data type for that variant's request and produces a generic response value for
+                /// the `send_resp` method. You can use this to ensure a schema-accurate response -
+                /// see the readme for canonical use.
+                pub async fn recv_req(&mut self) -> Result<Option<ServerReq>, Error> {
+                    let req = match read_framed(&mut self.0).await? {
+                        Some(m) => m,
+                        None => {
+                            return Ok(None);
+                        },
+                    };
+                    let req =
+                        serde_json::from_slice::<Req>(
+                            &req,
+                        ).map_err(
+                            |e| format!("Error parsing IPC request: {}\nBody: {}", e, String::from_utf8_lossy(&req)),
+                        )?;
+                    return Ok(Some(req.to_server_req()));
+                }
+
+                /// Send the response to the client.  `resp` is generated by the type-checking
+                /// "responder" in the request enum - see `recv_req`. An error can also be
+                /// generated using `ServerResp::err(...)`.
+                pub async fn send_resp(&mut self, resp: ServerResp) -> Result<(), Error> {
+                    write_framed(&mut self.0, &resp.0).await?;
+                    return Ok(());
+                }
+            }
+        }
+    };
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod test {
+    #![allow(dead_code)]
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+    reqresp!(pub x {
+        A(()) => i32,
+        B(i32) =>(),
+    });
 }
