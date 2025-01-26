@@ -1,6 +1,6 @@
 [package]
 name = "glove"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "ISC"
 repository = "https://github.com/andrewbaxter/glove"
