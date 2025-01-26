@@ -2,6 +2,10 @@
 name = "glove"
 version = "0.1.0"
 edition = "2021"
+license = "ISC"
+repository = "https://github.com/andrewbaxter/glove"
+readme = "readme.md"
+description = "Extremely client-server type-safe IPC"
 
 [dependencies]
 defer = "0.2"
