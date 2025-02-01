@@ -166,7 +166,7 @@ macro_rules! reqresp{
                             Self:: $req_name(
                                 req_inner
                             ) => ServerReq:: $req_name(
-                                |resp| ServerResp(serde_json::to_vec(&resp).unwrap()),
+                                |resp| ServerResp(serde_json::to_vec(&Resp::Ok(resp)).unwrap()),
                                 req_inner
                             ),
                         ) *
