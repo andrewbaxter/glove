@@ -222,7 +222,7 @@ macro_rules! reqresp{
             }
             pub struct Server {
                 pub sock: UnixListener,
-                cleanup: Vec<Box<dyn std::any::Any>>,
+                cleanup: Vec<Box<dyn std::any::Any + Send + Sync>>,
             }
             pub struct ServerConn(pub UnixStream);
             impl Server {
