@@ -221,10 +221,10 @@ macro_rules! reqresp{
                 }
             }
             pub struct Server {
-                sock: UnixListener,
+                pub sock: UnixListener,
                 cleanup: Vec<Box<dyn std::any::Any>>,
             }
-            pub struct ServerConn(UnixStream);
+            pub struct ServerConn(pub UnixStream);
             impl Server {
                 /// Create the IPC socket. This uses file locks to prevent multiple servers from
                 /// clobbering eachother.
