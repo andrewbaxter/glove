@@ -22,6 +22,7 @@ pub mod republish {
     pub use libc;
     pub use rustix;
     pub use defer;
+    pub use schemars;
 }
 
 pub type Error = String;
@@ -101,6 +102,7 @@ macro_rules! reqresp{
                         },
                         libc,
                         defer,
+                        schemars::JsonSchema,
                     },
                     read_framed,
                     write_framed,
@@ -147,7 +149,7 @@ macro_rules! reqresp{
             #[
                 doc(hidden)
             ] #[
-                derive(Serialize, Deserialize)
+                derive(Serialize, Deserialize, JsonSchema)
             ] #[serde(rename_all = "snake_case", deny_unknown_fields)] pub enum Req {
                 $($req_name($req_type),) *
             }
@@ -156,7 +158,7 @@ macro_rules! reqresp{
             pub trait ReqTrait {
                 type Resp: Serialize + DeserializeOwned;
 
-                fn to_message(self) -> Req;
+                fn to_enum(self) -> Req;
             }
             //. .
             impl Req {
@@ -176,7 +178,7 @@ macro_rules! reqresp{
             //. .
             $(impl ReqTrait for $req_type {
                 type Resp = $resp_type;
-                fn to_message(self) -> Req {
+                fn to_enum(self) -> Req {
                     return Req:: $req_name(self);
                 }
             }) * 
@@ -198,12 +200,7 @@ macro_rules! reqresp{
 
                 /// Sends a request and returns the associated response, or an error.
                 pub async fn send_req<I: ReqTrait>(&mut self, req: I) -> Result<I::Resp, String> {
-                    write_framed(&mut self.0, &serde_json::to_vec(&req.to_message()).unwrap()).await?;
-                    let resp =
-                        read_framed(&mut self.0)
-                            .await
-                            .map_err(|e| format!("Error reading IPC response: {}", e))?
-                            .ok_or_else(|| format!("Disconnected by remote host"))?;
+                    let resp = self.send_req_enum(&req.to_enum()).await?;
                     let resp =
                         serde_json::from_slice::<Resp<I::Resp>>(
                             &resp,
@@ -218,6 +215,14 @@ macro_rules! reqresp{
                         Resp::Ok(v) => return Ok(v),
                         Resp::Err(e) => return Err(e),
                     }
+                }
+                /// Sends a tagged request and returns the unparsed response json bytes. You'll typically want `send_req` instead.
+                pub async fn send_req_enum(&mut self, req: &Req) -> Result<Vec<u8>, String> {
+                    write_framed(&mut self.0, &serde_json::to_vec(req).unwrap()).await?;
+                        return Ok(read_framed(&mut self.0)
+                            .await
+                            .map_err(|e| format!("Error reading IPC response: {}", e))?
+                            .ok_or_else(|| format!("Disconnected by remote host"))?);
                 }
             }
             pub struct Server {
