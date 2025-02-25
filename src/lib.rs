@@ -132,15 +132,10 @@ macro_rules! reqresp_{
                 $req_name(fn($resp_type) -> ServerResp, $req_type),) *
         }
         //. .
-        #[
-            doc(hidden)
-        ] #[
-            derive(Serialize, Deserialize, JsonSchema)
-        ] #[serde(rename_all = "snake_case", deny_unknown_fields)] pub enum Req {
+        #[derive(Serialize, Deserialize, JsonSchema)] #[serde(rename_all = "snake_case", deny_unknown_fields)] pub enum Req {
             $($req_name($req_type),) *
         }
         //. .
-        #[doc(hidden)]
         pub trait ReqTrait {
             type Resp: Serialize + DeserializeOwned;
 
