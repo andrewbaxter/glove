@@ -5,6 +5,9 @@ use {
         Serialize,
     },
     std::io::ErrorKind,
+};
+#[cfg(feature = "unix")]
+use {
     tokio::{
         io::{
             AsyncReadExt,
@@ -18,11 +21,14 @@ use {
 pub mod republish {
     pub use serde;
     pub use serde_json;
-    pub use tokio;
-    pub use libc;
-    pub use rustix;
     pub use defer;
     pub use schemars;
+    #[cfg(feature = "unix")]
+    pub use tokio;
+    #[cfg(feature = "unix")]
+    pub use libc;
+    #[cfg(feature = "unix")]
+    pub use rustix;
 }
 
 pub type Error = String;
@@ -35,6 +41,7 @@ pub enum Resp<T> {
     Err(Error),
 }
 
+#[cfg(feature = "unix")]
 #[doc(hidden)]
 pub async fn write_framed(conn: &mut UnixStream, message: &[u8]) -> Result<(), Error> {
     conn.write_u64_le(message.len() as u64).await.map_err(|e| format!("Error writing frame size: {}", e))?;
@@ -42,6 +49,7 @@ pub async fn write_framed(conn: &mut UnixStream, message: &[u8]) -> Result<(), E
     return Ok(());
 }
 
+#[cfg(feature = "unix")]
 #[doc(hidden)]
 pub async fn read_framed(conn: &mut UnixStream) -> Result<Option<Vec<u8>>, Error> {
     let len = match conn.read_u64_le().await {
@@ -71,20 +79,129 @@ pub async fn read_framed(conn: &mut UnixStream) -> Result<Option<Vec<u8>>, Error
 /// response types, client and server structs, and methods for sending/receiving
 /// messages.
 #[macro_export]
+macro_rules! reqresp_{
+    ($vis: vis $name: ident {
+        $($req_name: ident($req_type: ty) => $resp_type: ty,) *
+    }) => {
+        use {
+            $crate:: {
+                republish:: {
+                    serde:: {
+                        Serialize,
+                        Deserialize,
+                        de::DeserializeOwned
+                    },
+                    serde_json,
+                    schemars::JsonSchema,
+                },
+                Resp,
+            },
+        };
+        #[allow(unused_imports)]
+        use {
+            super::*,
+        };
+        //. .
+        /// Generate a mapping of request and response names to the associated type json
+        /// schema. This is primarily intended for documentation generation (serializing
+        /// schemas).
+        pub fn to_json_schema() -> std:: collections:: HashMap < String,
+        schemars:: schema:: RootSchema > {
+            return[
+                $(
+                    (stringify!($req_name).to_string(), schemars::schema_for!($req_type)),
+                    (format!("{}Resp", stringify!($req_name)), schemars::schema_for!($resp_type)),
+                ) *
+            ].into_iter().collect();
+        }
+        //. .
+        pub struct ServerResp(Vec<u8>);
+        impl ServerResp {
+            /// Create a generic (non request-specific) error response.
+            pub fn err(e: impl Into<String>) -> ServerResp {
+                return ServerResp(serde_json::to_vec(&Resp::<()>::Err(e.into())).unwrap());
+            }
+        }
+        //. .
+        pub enum ServerReq {
+            $(
+                /// A request of type $req_type. This is a 2-tuple, with the first element being a
+                /// "responder" which type-checks the response data and produces a `ServerResp`.
+                /// The second element is the request data itself. See the readme for canonical
+                /// usage.
+                $req_name(fn($resp_type) -> ServerResp, $req_type),) *
+        }
+        //. .
+        #[
+            doc(hidden)
+        ] #[
+            derive(Serialize, Deserialize, JsonSchema)
+        ] #[serde(rename_all = "snake_case", deny_unknown_fields)] pub enum Req {
+            $($req_name($req_type),) *
+        }
+        //. .
+        #[doc(hidden)]
+        pub trait ReqTrait {
+            type Resp: Serialize + DeserializeOwned;
+
+            fn to_enum(self) -> Req;
+        }
+        //. .
+        impl Req {
+            fn to_server_req(self) -> ServerReq {
+                match self {
+                    $(
+                        Self:: $req_name(
+                            req_inner
+                        ) => ServerReq:: $req_name(
+                            |resp| ServerResp(serde_json::to_vec(&Resp::Ok(resp)).unwrap()),
+                            req_inner
+                        ),
+                    ) *
+                }
+            }
+        }
+        //. .
+        $(impl ReqTrait for $req_type {
+            type Resp = $resp_type;
+            fn to_enum(self) -> Req {
+                return Req:: $req_name(self);
+            }
+        }) *
+    };
+}
+
+#[cfg(not(feature = "unix"))]
+#[macro_export]
 macro_rules! reqresp{
     ($vis: vis $name: ident {
         $($req_name: ident($req_type: ty) => $resp_type: ty,) *
     }) => {
         $vis mod $name {
+            $crate:: reqresp_ ! {
+                $vis $name {
+                    $($req_name($req_type) => $resp_type,) *
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "unix")]
+#[macro_export]
+macro_rules! reqresp{
+    ($vis: vis $name: ident {
+        $($req_name: ident($req_type: ty) => $resp_type: ty,) *
+    }) => {
+        $vis mod $name {
+            $crate:: reqresp_ ! {
+                $vis $name {
+                    $($req_name($req_type) => $resp_type,) *
+                }
+            }
             use {
                 $crate:: {
                     republish:: {
-                        serde:: {
-                            Serialize,
-                            Deserialize,
-                            de::DeserializeOwned
-                        },
-                        serde_json,
                         tokio:: {
                             self,
                             net:: {
@@ -102,88 +219,16 @@ macro_rules! reqresp{
                         },
                         libc,
                         defer,
-                        schemars::JsonSchema,
                     },
                     read_framed,
                     write_framed,
                     Error,
-                    Resp,
                 },
             };
             #[allow(unused_imports)]
             use {
                 super::*,
             };
-            //. .
-            /// Generate a mapping of request and response names to the associated type json schema. 
-            /// This is primarily intended for documentation generation (serializing schemas).
-                pub fn to_json_schema() -> std:: collections:: HashMap < String,
-                schemars::schema::RootSchema > {
-                    return[
-                        $(
-                            (stringify!($req_name).to_string(), schemars::schema_for!($req_type)),
-                            (format!("{}Resp", stringify!($req_name)), schemars::schema_for!($resp_type))
-                            //. .
-                            ,
-                        ) *
-                    ].into_iter().collect();
-                }
-            //. .
-            pub struct ServerResp(Vec<u8>);
-            impl ServerResp {
-                /// Create a generic (non request-specific) error response.
-                pub fn err(e: impl Into<String>) -> ServerResp {
-                    return ServerResp(serde_json::to_vec(&Resp::<()>::Err(e.into())).unwrap());
-                }
-            }
-            //. .
-            pub enum ServerReq {
-                $(
-                    /// A request of type $req_type. This is a 2-tuple, with the first element being a
-                    /// "responder" which type-checks the response data and produces a `ServerResp`.
-                    /// The second element is the request data itself. See the readme for canonical
-                    /// usage.
-                    $req_name(fn($resp_type) -> ServerResp, $req_type),) *
-            }
-            //. .
-            #[
-                doc(hidden)
-            ] #[
-                derive(Serialize, Deserialize, JsonSchema)
-            ] #[serde(rename_all = "snake_case", deny_unknown_fields)] pub enum Req {
-                $($req_name($req_type),) *
-            }
-            //. .
-            #[doc(hidden)]
-            pub trait ReqTrait {
-                type Resp: Serialize + DeserializeOwned;
-
-                fn to_enum(self) -> Req;
-            }
-            //. .
-            impl Req {
-                fn to_server_req(self) -> ServerReq {
-                    match self {
-                        $(
-                            Self:: $req_name(
-                                req_inner
-                            ) => ServerReq:: $req_name(
-                                |resp| ServerResp(serde_json::to_vec(&Resp::Ok(resp)).unwrap()),
-                                req_inner
-                            ),
-                        ) *
-                    }
-                }
-            }
-            //. .
-            $(impl ReqTrait for $req_type {
-                type Resp = $resp_type;
-                fn to_enum(self) -> Req {
-                    return Req:: $req_name(self);
-                }
-            }) * 
-            // UDS
-            //. .
             pub struct Client(UnixStream);
             impl Client {
                 /// Connect to an existing server socket.
@@ -216,13 +261,17 @@ macro_rules! reqresp{
                         Resp::Err(e) => return Err(e),
                     }
                 }
-                /// Sends a tagged request and returns the unparsed response json bytes. You'll typically want `send_req` instead.
+
+                /// Sends a tagged request and returns the unparsed response json bytes. You'll
+                /// typically want `send_req` instead.
                 pub async fn send_req_enum(&mut self, req: &Req) -> Result<Vec<u8>, String> {
                     write_framed(&mut self.0, &serde_json::to_vec(req).unwrap()).await?;
-                        return Ok(read_framed(&mut self.0)
+                    return Ok(
+                        read_framed(&mut self.0)
                             .await
                             .map_err(|e| format!("Error reading IPC response: {}", e))?
-                            .ok_or_else(|| format!("Disconnected by remote host"))?);
+                            .ok_or_else(|| format!("Disconnected by remote host"))?,
+                    );
                 }
             }
             pub struct Server {
@@ -324,7 +373,7 @@ macro_rules! reqresp{
                 }
             }
         }
-    };
+    }
 }
 
 #[cfg(test)]
