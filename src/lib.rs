@@ -4,7 +4,6 @@ use {
         Deserialize,
         Serialize,
     },
-    std::io::ErrorKind,
 };
 #[cfg(feature = "unix")]
 use {
@@ -15,6 +14,7 @@ use {
         },
         net::UnixStream,
     },
+    std::io::ErrorKind,
 };
 
 #[doc(hidden)]
