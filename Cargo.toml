@@ -8,7 +8,7 @@ readme = "readme.md"
 description = "Extremely client-server type-safe IPC"
 
 [features]
-unix = ["dep:tokio", "dep:libc", "dep:tokio"]
+unix = ["dep:tokio", "dep:libc", "dep:rustix"]
 
 [dependencies]
 schemars = "0.8"
