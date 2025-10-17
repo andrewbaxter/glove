@@ -143,7 +143,7 @@ macro_rules! reqresp_{
         }
         //. .
         impl Req {
-            fn to_server_req(self) -> ServerReq {
+            pub fn to_server_req(self) -> ServerReq {
                 match self {
                     $(
                         Self:: $req_name(
