@@ -115,7 +115,7 @@ macro_rules! reqresp_{
             ].into_iter().collect();
         }
         //. .
-        pub struct ServerResp(Vec<u8>);
+        pub struct ServerResp(pub Vec<u8>);
         impl ServerResp {
             /// Create a generic (non request-specific) error response.
             pub fn err(e: impl Into<String>) -> ServerResp {
