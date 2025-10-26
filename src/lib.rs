@@ -106,7 +106,7 @@ macro_rules! reqresp_{
         /// schema. This is primarily intended for documentation generation (serializing
         /// schemas).
         pub fn to_json_schema() -> std:: collections:: HashMap < String,
-        schemars:: schema:: RootSchema > {
+        schemars:: Schema > {
             return[
                 $(
                     (stringify!($req_name).to_string(), schemars::schema_for!($req_type)),
