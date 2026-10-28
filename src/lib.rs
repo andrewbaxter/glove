@@ -1,3 +1,29 @@
+#[doc(hidden)]
+pub mod republish {
+    pub use {
+        defer,
+        schemars,
+        serde,
+        serde_json,
+    };
+    #[cfg(feature = "unix")]
+    pub use {
+        libc,
+        rustix,
+        tokio,
+    };
+}
+
+#[cfg(test)]
+mod test {
+    #![allow(dead_code)]
+
+    reqresp!(pub x {
+        A(()) => i32,
+        B(i32) =>(),
+    });
+}
+
 use {
     schemars::JsonSchema,
     serde::{
@@ -7,6 +33,7 @@ use {
 };
 #[cfg(feature = "unix")]
 use {
+    std::io::ErrorKind,
     tokio::{
         io::{
             AsyncReadExt,
@@ -14,157 +41,7 @@ use {
         },
         net::UnixStream,
     },
-    std::io::ErrorKind,
 };
-
-#[doc(hidden)]
-pub mod republish {
-    pub use serde;
-    pub use serde_json;
-    pub use defer;
-    pub use schemars;
-    #[cfg(feature = "unix")]
-    pub use tokio;
-    #[cfg(feature = "unix")]
-    pub use libc;
-    #[cfg(feature = "unix")]
-    pub use rustix;
-}
-
-pub type Error = String;
-
-#[doc(hidden)]
-#[derive(Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum Resp<T> {
-    Ok(T),
-    Err(Error),
-}
-
-#[cfg(feature = "unix")]
-#[doc(hidden)]
-pub async fn write_framed(conn: &mut UnixStream, message: &[u8]) -> Result<(), Error> {
-    conn.write_u64_le(message.len() as u64).await.map_err(|e| format!("Error writing frame size: {}", e))?;
-    conn.write_all(message).await.map_err(|e| format!("Error writing frame body: {}", e))?;
-    return Ok(());
-}
-
-#[cfg(feature = "unix")]
-#[doc(hidden)]
-pub async fn read_framed(conn: &mut UnixStream) -> Result<Option<Vec<u8>>, Error> {
-    let len = match conn.read_u64_le().await {
-        Ok(len) => len,
-        Err(e) => {
-            match e.kind() {
-                ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::UnexpectedEof => {
-                    return Ok(None);
-                },
-                _ => { },
-            }
-            return Err(format!("Error reading message length from connection: {}", e));
-        },
-    };
-    let mut body = vec![];
-    body.reserve(len as usize);
-    match conn.read_buf(&mut body).await {
-        Ok(_) => { },
-        Err(e) => {
-            return Err(format!("Error reading message body from connection: {}", e));
-        },
-    }
-    return Ok(Some(body));
-}
-
-/// See readme for details. This builds the request enum with trait with associated
-/// response types, client and server structs, and methods for sending/receiving
-/// messages.
-#[macro_export]
-macro_rules! reqresp_{
-    ($vis: vis $name: ident {
-        $($req_name: ident($req_type: ty) => $resp_type: ty,) *
-    }) => {
-        use {
-            $crate:: {
-                republish:: {
-                    serde:: {
-                        Serialize,
-                        Deserialize,
-                        de::DeserializeOwned
-                    },
-                    serde_json,
-                    schemars::JsonSchema,
-                },
-                Resp,
-            },
-        };
-        #[allow(unused_imports)]
-        use {
-            super::*,
-        };
-        //. .
-        /// Generate a mapping of request and response names to the associated type json
-        /// schema. This is primarily intended for documentation generation (serializing
-        /// schemas).
-        pub fn to_json_schema() -> std:: collections:: HashMap < String,
-        schemars:: Schema > {
-            return[
-                $(
-                    (stringify!($req_name).to_string(), schemars::schema_for!($req_type)),
-                    (format!("{}Resp", stringify!($req_name)), schemars::schema_for!($resp_type)),
-                ) *
-            ].into_iter().collect();
-        }
-        //. .
-        pub struct ServerResp(pub Vec<u8>);
-        impl ServerResp {
-            /// Create a generic (non request-specific) error response.
-            pub fn err(e: impl Into<String>) -> ServerResp {
-                return ServerResp(serde_json::to_vec(&Resp::<()>::Err(e.into())).unwrap());
-            }
-        }
-        //. .
-        pub enum ServerReq {
-            $(
-                /// A request of type $req_type. This is a 2-tuple, with the first element being a
-                /// "responder" which type-checks the response data and produces a `ServerResp`.
-                /// The second element is the request data itself. See the readme for canonical
-                /// usage.
-                $req_name(fn($resp_type) -> ServerResp, $req_type),) *
-        }
-        //. .
-        #[derive(Serialize, Deserialize, JsonSchema)] #[serde(rename_all = "snake_case", deny_unknown_fields)] pub enum Req {
-            $($req_name($req_type),) *
-        }
-        //. .
-        pub trait ReqTrait {
-            type Resp: Serialize + DeserializeOwned;
-
-            fn to_enum(self) -> Req;
-        }
-        //. .
-        impl Req {
-            pub fn to_server_req(self) -> ServerReq {
-                match self {
-                    $(
-                        Self:: $req_name(
-                            req_inner
-                        ) => ServerReq:: $req_name(
-                            |resp| ServerResp(serde_json::to_vec(&Resp::Ok(resp)).unwrap()),
-                            req_inner
-                        ),
-                    ) *
-                }
-            }
-        }
-        //. .
-        $(impl ReqTrait for $req_type {
-            type Resp = $resp_type;
-            fn to_enum(self) -> Req {
-                return Req:: $req_name(self);
-            }
-        }) *
-    };
-}
 
 #[cfg(not(feature = "unix"))]
 #[macro_export]
@@ -245,11 +122,7 @@ macro_rules! reqresp{
                         serde_json::from_slice::<Resp<I::Resp>>(
                             &resp,
                         ).map_err(
-                            |e| format!(
-                                "Error parsing IPC response: {}\nBody: {}",
-                                e,
-                                String::from_utf8_lossy(&resp)
-                            ),
+                            |e| format!("Error parsing IPC response: {}\nBody: {}", e, String::from_utf8_lossy(&resp)),
                         )?;
                     match resp {
                         Resp::Ok(v) => return Ok(v),
@@ -371,12 +244,143 @@ macro_rules! reqresp{
     }
 }
 
-#[cfg(test)]
-mod test {
-    #![allow(dead_code)]
+/// See readme for details. This builds the request enum with trait with associated
+/// response types, client and server structs, and methods for sending/receiving
+/// messages.
+#[macro_export]
+macro_rules! reqresp_{
+    ($vis: vis $name: ident {
+        $($req_name: ident($req_type: ty) => $resp_type: ty,) *
+    }) => {
+        use {
+            $crate:: {
+                republish:: {
+                    serde:: {
+                        Serialize,
+                        Deserialize,
+                        de::DeserializeOwned
+                    },
+                    serde_json,
+                    schemars::JsonSchema,
+                },
+                Resp,
+            },
+        };
+        #[allow(unused_imports)]
+        use {
+            super::*,
+        };
+        //. .
+        /// Generate a mapping of request and response names to the associated type json
+        /// schema. This is primarily intended for documentation generation (serializing
+        /// schemas).
+        pub fn to_json_schema() -> std:: collections:: HashMap < String,
+        schemars:: Schema > {
+            return[
+                $(
+                    (stringify!($req_name).to_string(), schemars::schema_for!($req_type)),
+                    (format!("{}Resp", stringify!($req_name)), schemars::schema_for!($resp_type)),
+                ) *
+            ].into_iter().collect();
+        }
+        //. .
+        pub struct ServerResp(pub Vec<u8>);
+        impl ServerResp {
+            /// Create a generic (non request-specific) error response.
+            pub fn err(e: impl Into<String>) -> ServerResp {
+                return ServerResp(serde_json::to_vec(&Resp::<()>::Err(e.into())).unwrap());
+            }
+        }
+        //. .
+        pub enum ServerReq {
+            $(
+                /// A request of type $req_type. This is a 2-tuple, with the first element being a
+                /// "responder" which type-checks the response data and produces a `ServerResp`.
+                /// The second element is the request data itself. See the readme for canonical
+                /// usage.
+                $req_name(fn($resp_type) -> ServerResp, $req_type),) *
+        }
+        //. .
+        #[derive(Serialize, Deserialize, JsonSchema)] #[serde(rename_all = "snake_case", deny_unknown_fields)] pub enum Req {
+            $($req_name($req_type),) *
+        }
+        //. .
+        pub trait ReqTrait {
+            type Resp: Serialize + DeserializeOwned;
 
-    reqresp!(pub x {
-        A(()) => i32,
-        B(i32) =>(),
-    });
+            fn to_enum(self) -> Req;
+        }
+        //. .
+        impl Req {
+            pub fn to_server_req(self) -> ServerReq {
+                match self {
+                    $(
+                        Self:: $req_name(
+                            req_inner
+                        ) => ServerReq:: $req_name(
+                            |resp| ServerResp(serde_json::to_vec(&Resp::Ok(resp)).unwrap()),
+                            req_inner
+                        ),
+                    ) *
+                }
+            }
+        }
+        //. .
+        $(impl ReqTrait for $req_type {
+            type Resp = $resp_type;
+            fn to_enum(self) -> Req {
+                return Req:: $req_name(self);
+            }
+        }) *
+    };
+}
+
+pub const MAX_FRAME_SIZE: u64 = 64 * 1024 * 1024;
+pub type Error = String;
+
+#[cfg(feature = "unix")]
+#[doc(hidden)]
+pub async fn read_framed(conn: &mut UnixStream) -> Result<Option<Vec<u8>>, Error> {
+    let len = match conn.read_u64_le().await {
+        Ok(len) => len,
+        Err(e) => {
+            match e.kind() {
+                ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::UnexpectedEof => {
+                    return Ok(None);
+                },
+                _ => { },
+            }
+            return Err(format!("Error reading message length from connection: {}", e));
+        },
+    };
+    if len > MAX_FRAME_SIZE {
+        return Err(format!("Message length {} exceeds maximum frame size {}", len, MAX_FRAME_SIZE));
+    }
+    let mut body = vec![
+        0u8;
+        len as usize
+    ];
+    match conn.read_exact(&mut body).await {
+        Ok(_) => { },
+        Err(e) => {
+            return Err(format!("Error reading message body from connection: {}", e));
+        },
+    }
+    return Ok(Some(body));
+}
+
+#[doc(hidden)]
+#[derive(Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum Resp<T> {
+    Err(Error),
+    Ok(T),
+}
+
+#[cfg(feature = "unix")]
+#[doc(hidden)]
+pub async fn write_framed(conn: &mut UnixStream, message: &[u8]) -> Result<(), Error> {
+    conn.write_u64_le(message.len() as u64).await.map_err(|e| format!("Error writing frame size: {}", e))?;
+    conn.write_all(message).await.map_err(|e| format!("Error writing frame body: {}", e))?;
+    return Ok(());
 }
